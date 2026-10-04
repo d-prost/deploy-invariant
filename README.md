@@ -122,10 +122,17 @@ CI runs the matching repository and disposable proofs. CI has no Production depl
 
 The single-target stateless transaction path is implemented and covered by disposable proofs.
 
-Two external gates remain before `v1.0.0`:
+Both external gates for `v1.0.0` now have completed evidence:
 
-- #2 — effective `main` change controls with blocked-merge proof;
-- #3 — one real transaction and verified rollback against a separate SSH target.
+- #2 — active `main` change controls, observed blocked merge on a failed required
+  check and merge eligibility with zero human approvals after checks passed;
+- #3 — a real accepted transaction and verified rollback against a separate SSH
+  target, followed by independent functional re-verification and cleanup.
+
+The [remote SSH record](docs/evidence/REMOTE_SSH_PROOF_2026-10-05.md) and
+[final acceptance record](docs/evidence/V1_ACCEPTANCE_2026-10-05.md) contain
+public-safe versions, results and timings. All eight final proof targets passed
+on the disposable Ubuntu VM.
 
 The first stateful recovery reference is tracked separately in #4 and does not block the initial stateless release.
 

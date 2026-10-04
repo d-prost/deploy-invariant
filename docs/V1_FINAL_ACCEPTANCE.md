@@ -2,13 +2,14 @@
 
 The remaining v1 work is grouped into one final acceptance pass rather than another round of framework changes.
 
-This document describes the sequence; it does not claim the external proofs are already complete.
+This document describes the sequence. The completed run is recorded in
+[`V1_ACCEPTANCE_2026-10-05.md`](evidence/V1_ACCEPTANCE_2026-10-05.md).
 
 ## Starting state
 
 - clean `main` checkout on the control host;
 - private inventory and SSH material outside the repository;
-- #2 and #3 still open until their real evidence exists;
+- #2 and #3 close only after their real evidence exists;
 - issue #4 remains post-v1 work.
 
 ## 1. Main change controls
