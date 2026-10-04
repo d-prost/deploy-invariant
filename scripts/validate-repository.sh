@@ -9,6 +9,7 @@ for path in sorted(Path('scripts').glob('*.py')):
 print('Python syntax validation passed.')
 PYCODE
 python3 scripts/check-public-safety.py
+python3 scripts/check-branding.py
 python3 scripts/validate-advisory-rules.py
 python3 scripts/validate-stack-contracts.py
 python3 tests/test-advisory-rules.py
