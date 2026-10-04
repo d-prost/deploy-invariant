@@ -1,0 +1,442 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+  printf 'Usage: %s STACK [--check] [--inventory production|lab] [--ref GIT_REF]\n' "$0" >&2
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    printf 'ERROR: required command not found: %s\n' "$1" >&2
+    exit 1
+  }
+}
+
+if (($# < 1)); then
+  usage
+  exit 2
+fi
+
+if ((EUID == 0)); then
+  printf 'ERROR: run Git and Ansible as a normal operator, not root.\n' >&2
+  exit 1
+fi
+
+stack="$1"
+shift
+inventory="production"
+git_ref="HEAD"
+check_mode=0
+
+[[ "$stack" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
+  printf 'ERROR: unsafe stack name: %s\n' "$stack" >&2
+  exit 2
+}
+
+while (($#)); do
+  case "$1" in
+    --check)
+      check_mode=1
+      shift
+      ;;
+    --inventory)
+      (($# >= 2)) || { usage; exit 2; }
+      inventory="$2"
+      shift 2
+      ;;
+    --ref)
+      (($# >= 2)) || { usage; exit 2; }
+      git_ref="$2"
+      shift 2
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+case "$inventory" in
+  production)
+    production_operation=1
+    ;;
+  lab)
+    production_operation=0
+    ;;
+  *)
+    printf 'ERROR: unsupported inventory: %s\n' "$inventory" >&2
+    exit 2
+    ;;
+esac
+
+for required_command in ansible-inventory ansible-playbook awk flock git python3 sed sha256sum sudo tar; do
+  require_command "$required_command"
+done
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$repo_root"
+git rev-parse --is-inside-work-tree >/dev/null
+
+if [[ "$inventory" == "lab" ]]; then
+  [[ -n "${DEPLOY_INVARIANT_LAB_HOSTNAME:-}" ]] || {
+    printf 'ERROR: set DEPLOY_INVARIANT_LAB_HOSTNAME to the exact Lab hostname.\n' >&2
+    exit 1
+  }
+fi
+
+# Recovery must not depend on origin availability after PREPARED. For
+# Production, require a clean local main control plane before touching durable
+# transaction state; origin freshness is checked only after interruption state
+# has been resolved.
+if ((production_operation == 1)); then
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
+    printf 'ERROR: refusing Production recovery/deployment from a dirty working tree.\n' >&2
+    exit 1
+  }
+  [[ "$(git branch --show-current)" == "main" ]] || {
+    printf 'ERROR: Production recovery/deployment must use the current main control plane.\n' >&2
+    exit 1
+  }
+fi
+
+operation_root="$(mktemp -d /tmp/deploy-invariant-ops-operation.XXXXXXXX)"
+transaction_root="$operation_root"
+
+cleanup() {
+  rm -rf -- "$operation_root"
+}
+trap cleanup EXIT
+
+inventory_file="$repo_root/ansible/inventory/$inventory/hosts.yml"
+[[ -f "$inventory_file" ]] || {
+  printf 'ERROR: inventory file missing: %s\n' "$inventory_file" >&2
+  exit 1
+}
+
+export ANSIBLE_CONFIG="$repo_root/ansible/ansible.cfg"
+export ANSIBLE_HOST_KEY_CHECKING=True
+bash "$repo_root/scripts/assert-ansible-hosts.sh" "$inventory_file"
+if ((production_operation == 1)); then
+  python3 "$repo_root/scripts/validate-target-inventory.py" \
+    "$inventory_file" --environment production
+fi
+
+target_lock_key="$(python3 "$repo_root/scripts/target-lock-key.py" "$inventory_file")"
+lock_file="/run/lock/deploy-invariant-ops-${target_lock_key}-${stack}.lock"
+# shellcheck source=scripts/lock-utils.sh
+source "$repo_root/scripts/lock-utils.sh"
+if deploy_invariant_acquire_global_lock "$lock_file"; then
+  :
+else
+  lock_rc=$?
+  if ((lock_rc == 75)); then
+    printf 'ERROR: PRE_MUTATION_REFUSAL: another transaction already holds the target/stack lock: %s\n' "$lock_file" >&2
+  else
+    printf 'ERROR: PRE_MUTATION_REFUSAL: host-global lock cannot be established: %s\n' "$lock_file" >&2
+  fi
+  exit 1
+fi
+
+become_args=()
+if ((production_operation == 1)) && ! sudo -n true >/dev/null 2>&1; then
+  become_args+=(--ask-become-pass)
+fi
+
+ansible-playbook -i "$inventory_file" \
+  "$repo_root/ansible/playbooks/inspect-transaction-state.yml" \
+  -e "stack_name=$stack" \
+  -e "deploy_invariant_transaction_root=$operation_root" \
+  "${become_args[@]}"
+
+state_line="$(
+  python3 "$repo_root/scripts/classify-transaction-state.py" \
+    --stack "$stack" \
+    --marker "$operation_root/observed.marker" \
+    --record "$operation_root/observed.record" \
+    --receipt "$operation_root/observed.receipt"
+)" || {
+  printf 'ERROR: INTERRUPTED_UNRESOLVED: durable transaction state could not be classified.\n' >&2
+  exit 1
+}
+
+IFS='|' read -r interrupted_action interrupted_transaction_id \
+  interrupted_candidate_commit interrupted_previous_commit \
+  interrupted_previous_record_id interrupted_phase interrupted_record_hash \
+  <<<"$state_line"
+
+if [[ "$interrupted_action" != "NONE" ]] && ((check_mode == 1)); then
+  printf 'ERROR: INTERRUPTED_UNRESOLVED: transaction state requires reconciliation; rerun without --check. phase=%s\n' "$interrupted_phase" >&2
+  exit 1
+fi
+
+case "$interrupted_action" in
+  NONE)
+    ;;
+  CLEANUP)
+    ansible-playbook -i "$inventory_file" \
+      "$repo_root/ansible/playbooks/cleanup-prepared-interruption.yml" \
+      -e "stack_name=$stack" \
+      -e "deploy_invariant_interrupted_transaction_id=$interrupted_transaction_id" \
+      -e "deploy_invariant_repo_root=$repo_root" \
+      "${become_args[@]}" || {
+        printf 'ERROR: INTERRUPTED_UNRESOLVED: PREPARED cleanup failed for transaction %s.\n' "$interrupted_transaction_id" >&2
+        exit 1
+      }
+    ;;
+  RESTORE)
+    ansible-playbook -i "$inventory_file" \
+      "$repo_root/ansible/playbooks/reconcile-interrupted.yml" \
+      -e "stack_name=$stack" \
+      -e "deploy_invariant_interrupted_transaction_id=$interrupted_transaction_id" \
+      -e "deploy_invariant_interrupted_candidate_commit=$interrupted_candidate_commit" \
+      -e "deploy_invariant_interrupted_previous_commit=$interrupted_previous_commit" \
+      -e "deploy_invariant_interrupted_previous_record_id=$interrupted_previous_record_id" \
+      -e "deploy_invariant_repo_root=$repo_root" \
+      "${become_args[@]}" || {
+        printf 'ERROR: INTERRUPTED_UNRESOLVED: recovery failed for transaction %s; the unresolved marker remains.\n' "$interrupted_transaction_id" >&2
+        exit 1
+      }
+    ;;
+  ACCEPTED_STALE)
+    ansible-playbook -i "$inventory_file" \
+      "$repo_root/ansible/playbooks/clear-stale-accepted-marker.yml" \
+      -e "stack_name=$stack" \
+      -e "deploy_invariant_interrupted_transaction_id=$interrupted_transaction_id" \
+      -e "deploy_invariant_expected_record_hash=$interrupted_record_hash" \
+      -e "deploy_invariant_repo_root=$repo_root" \
+      "${become_args[@]}" || {
+        printf 'ERROR: INTERRUPTED_UNRESOLVED: durable acceptance proof failed for stale transaction %s.\n' "$interrupted_transaction_id" >&2
+        exit 1
+      }
+    ;;
+  MANUAL)
+    printf 'ERROR: INTERRUPTED_UNRESOLVED: transaction %s remains ambiguous in phase %s; operator reconciliation is required.\n' "$interrupted_transaction_id" "$interrupted_phase" >&2
+    exit 1
+    ;;
+  *)
+    printf 'ERROR: INTERRUPTED_UNRESOLVED: unsupported recovery action: %s\n' "$interrupted_action" >&2
+    exit 1
+    ;;
+esac
+
+# Only after durable interruption state is resolved do we authorize and freeze
+# a new candidate. This preserves post-PREPARED recovery independence from
+# origin, branches and newly resolved Git references.
+#
+# Historical refs provide stack payload only; the current checkout remains the
+# authoritative control plane for validation, recovery and deployment tooling.
+if [[ "$git_ref" != "HEAD" ]] && ! git check-ref-format --branch "$git_ref" >/dev/null 2>&1; then
+  printf 'ERROR: unsafe or invalid Git ref: %s\n' "$git_ref" >&2
+  exit 2
+fi
+
+if ((production_operation == 1)); then
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
+    printf 'ERROR: refusing Production operation from a dirty working tree.\n' >&2
+    exit 1
+  }
+  [[ "$(git branch --show-current)" == "main" ]] || {
+    printf 'ERROR: Production operations must use the current main control plane.\n' >&2
+    exit 1
+  }
+  git fetch --quiet origin main
+  [[ "$(git rev-parse 'HEAD^{commit}')" == "$(git rev-parse 'origin/main^{commit}')" ]] || {
+    printf 'ERROR: local main control plane is not exactly origin/main.\n' >&2
+    exit 1
+  }
+fi
+
+if [[ "$git_ref" == "HEAD" ]]; then
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
+    printf 'ERROR: refusing to deploy HEAD from a dirty working tree.\n' >&2
+    exit 1
+  }
+elif ((production_operation == 1)) && [[ ! "$git_ref" =~ ^release-[0-9]{8}-[0-9]{6}Z$ ]]; then
+  printf 'ERROR: Production --ref accepts only an exact verified release tag.\n' >&2
+  exit 1
+fi
+
+if ((production_operation == 1)) && [[ "$git_ref" != "HEAD" ]]; then
+  git show-ref --verify --quiet "refs/tags/$git_ref" || {
+    printf 'ERROR: Production ref is not a local tag: %s\n' "$git_ref" >&2
+    exit 1
+  }
+  [[ "$(git cat-file -t "refs/tags/$git_ref")" == "tag" ]] || {
+    printf 'ERROR: Production rollback requires an annotated tag.\n' >&2
+    exit 1
+  }
+  release_commit="$(git rev-parse "refs/tags/$git_ref^{commit}")"
+
+  remote_tag_record="$(git ls-remote --tags origin "refs/tags/$git_ref^{}")"
+  [[ -n "$remote_tag_record" ]] || {
+    printf 'ERROR: release tag is not published on origin: %s\n' "$git_ref" >&2
+    exit 1
+  }
+  read -r remote_release_commit _ <<<"$remote_tag_record"
+  [[ "$remote_release_commit" == "$release_commit" ]] || {
+    printf 'ERROR: local release tag does not match origin: %s\n' "$git_ref" >&2
+    exit 1
+  }
+  if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+    printf 'ERROR: release commit is not part of origin/main history: %s\n' "$git_ref" >&2
+    exit 1
+  fi
+fi
+
+tooling_commit="$(git rev-parse 'HEAD^{commit}')"
+if [[ "$git_ref" == "HEAD" ]]; then
+  release_commit="$tooling_commit"
+elif ((production_operation == 1)); then
+  release_commit="$(git rev-parse "refs/tags/$git_ref^{commit}")"
+else
+  git cat-file -e "${git_ref}^{commit}"
+  release_commit="$(git rev-parse "${git_ref}^{commit}")"
+fi
+
+transaction_id="$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
+release_root="$operation_root/candidate"
+previous_release_root=""
+previous_accepted_commit=""
+previous_record_id=""
+
+bash "$repo_root/scripts/materialize-git-snapshot.sh" \
+  "$repo_root" "$release_commit" "$release_root" "stacks/$stack" >/dev/null
+
+stack_dir="$release_root/stacks/$stack"
+stack_contract="$stack_dir/stack.yml"
+[[ -f "$stack_contract" ]] || {
+  printf 'ERROR: stack release payload is unavailable at ref %s: %s\n' "$git_ref" "$stack" >&2
+  exit 1
+}
+
+# Every selected payload is re-validated by the current control plane, including
+# historical release tags used for rollback.
+if ! python3 "$repo_root/scripts/validate-stack-contracts.py" --stack-dir "$stack_dir"; then
+  printf 'ERROR: PRE_MUTATION_REFUSAL: candidate stack contract or manifest validation failed.\n' >&2
+  exit 1
+fi
+
+if ((production_operation == 1)); then
+  readiness_args=(
+    "$repo_root/scripts/check-recovery-readiness.py"
+    "$stack_contract"
+    --forbid-evidence-under "$repo_root"
+  )
+  current_stack_contract="$repo_root/stacks/$stack/stack.yml"
+  if [[ -f "$current_stack_contract" ]]; then
+    readiness_args+=(--current-contract "$current_stack_contract")
+  fi
+  if [[ -n "${DEPLOY_INVARIANT_RECOVERY_EVIDENCE:-}" ]]; then
+    readiness_args+=(--evidence "$DEPLOY_INVARIANT_RECOVERY_EVIDENCE")
+  fi
+  if [[ -n "${DEPLOY_INVARIANT_BACKUP_MAX_AGE_SECONDS:-}" ]]; then
+    readiness_args+=(--max-backup-age-seconds "$DEPLOY_INVARIANT_BACKUP_MAX_AGE_SECONDS")
+  fi
+  python3 "${readiness_args[@]}"
+fi
+
+contract_hash="$(sha256sum "$stack_contract" | awk '{print $1}')"
+manifest_hash="$(sha256sum "$stack_dir/MANIFEST.tsv" | awk '{print $1}')"
+
+if ! ansible-playbook -i "$inventory_file" \
+  "$repo_root/ansible/playbooks/preflight.yml" \
+  -e "stack_name=$stack" \
+  -e "deploy_invariant_repo_root=$repo_root" \
+  -e "deploy_invariant_release_root=$release_root" \
+  "${become_args[@]}"; then
+  printf 'ERROR: PRE_MUTATION_REFUSAL: transport or target preflight failed.\n' >&2
+  exit 1
+fi
+
+# Resolve the previous accepted state only after the selected target passes the
+# existing read-only preflight identity checks, but still before any mutation.
+ansible-playbook -i "$inventory_file" \
+  "$repo_root/ansible/playbooks/read-accepted-record.yml" \
+  -e "stack_name=$stack" \
+  -e "deploy_invariant_transaction_root=$transaction_root" \
+  "${become_args[@]}"
+
+rollback_images_b64=""
+if [[ -f "$transaction_root/previous.record" ]]; then
+  mapfile -t previous_commit_matches < <(
+    sed -nE 's/^commit=([0-9a-f]{40})$/\1/p' "$transaction_root/previous.record"
+  )
+  (("${#previous_commit_matches[@]}" == 1)) || {
+    printf 'ERROR: PRE_MUTATION_REFUSAL: prior deployment record does not contain exactly one valid commit.\n' >&2
+    exit 1
+  }
+  previous_accepted_commit="${previous_commit_matches[0]}"
+  previous_record_id="$(sha256sum "$transaction_root/previous.record" | awk '{print $1}')"
+  previous_release_root="$transaction_root/previous"
+  if ! bash "$repo_root/scripts/materialize-git-snapshot.sh" \
+    "$repo_root" "$previous_accepted_commit" "$previous_release_root" "stacks/$stack" >/dev/null; then
+    printf 'ERROR: PRE_MUTATION_REFUSAL: previous accepted Git material is unavailable.\n' >&2
+    exit 1
+  fi
+
+  previous_stack_dir="$previous_release_root/stacks/$stack"
+  python3 "$repo_root/scripts/validate-stack-contracts.py" --stack-dir "$previous_stack_dir" || {
+    printf 'ERROR: PRE_MUTATION_REFUSAL: previous accepted rollback material is invalid.\n' >&2
+    exit 1
+  }
+  if ! rollback_images_b64="$(
+    python3 "$repo_root/scripts/render-stack-images.py" \
+      --stack-dir "$previous_stack_dir" \
+      --docker-path /usr/bin/docker \
+      --base64-json
+  )"; then
+    printf 'ERROR: PRE_MUTATION_REFUSAL: rollback runtime images cannot be resolved.\n' >&2
+    exit 1
+  fi
+fi
+
+if ! candidate_images_b64="$(
+  python3 "$repo_root/scripts/render-stack-images.py" \
+    --stack-dir "$stack_dir" \
+    --docker-path /usr/bin/docker \
+    --base64-json
+)"; then
+  printf 'ERROR: PRE_MUTATION_REFUSAL: candidate runtime images cannot be resolved.\n' >&2
+  exit 1
+fi
+
+if ((check_mode == 0)); then
+  ansible-playbook -i "$inventory_file" \
+    "$repo_root/ansible/playbooks/preflight-images.yml" \
+    -e "stack_name=$stack" \
+    -e "deploy_invariant_repo_root=$repo_root" \
+    -e "deploy_invariant_candidate_images_b64=$candidate_images_b64" \
+    -e "deploy_invariant_rollback_images_b64=$rollback_images_b64" \
+    "${become_args[@]}" || {
+      printf 'ERROR: PRE_MUTATION_REFUSAL: required runtime image is unavailable by digest.\n' >&2
+      exit 1
+    }
+fi
+
+deploy_args=(
+  -i "$inventory_file"
+  "$repo_root/ansible/playbooks/deploy-stack.yml"
+  -e "stack_name=$stack"
+  -e "deploy_invariant_release_commit=$release_commit"
+  -e "deploy_invariant_tooling_commit=$tooling_commit"
+  -e "deploy_invariant_transaction_id=$transaction_id"
+  -e "deploy_invariant_contract_hash=$contract_hash"
+  -e "deploy_invariant_manifest_hash=$manifest_hash"
+  -e "deploy_invariant_previous_accepted_commit=$previous_accepted_commit"
+  -e "deploy_invariant_previous_record_id=$previous_record_id"
+  -e "deploy_invariant_previous_record_source=$transaction_root/previous.record"
+  -e "deploy_invariant_previous_release_root=$previous_release_root"
+  -e "deploy_invariant_repo_root=$repo_root"
+  -e "deploy_invariant_release_root=$release_root"
+  "${become_args[@]}"
+)
+
+if ((check_mode == 1)); then
+  deploy_args+=(--check --diff)
+fi
+
+ansible-playbook "${deploy_args[@]}"

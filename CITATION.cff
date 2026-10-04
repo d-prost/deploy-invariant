@@ -1,0 +1,6 @@
+cff-version: 1.2.0
+title: DeployInvariant
+message: Cite the repository and the release used.
+type: software
+license: MIT
+repository-code: https://github.com/d-prost/deploy-invariant

@@ -1,0 +1,15 @@
+---
+name: deploy-invariant-ops-nginx-demo
+
+services:
+  nginx:
+    image: ${NGINX_IMAGE:?Set immutable NGINX_IMAGE RepoDigest}
+    container_name: deploy-invariant-ops-demo-nginx
+    restart: unless-stopped
+    networks:
+      - deploy_invariant_ops_nginx_demo
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  deploy_invariant_ops_nginx_demo: {}

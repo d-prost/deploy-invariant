@@ -1,0 +1,834 @@
+---
+- name: Validate stack contract
+  ansible.builtin.assert:
+    that:
+      - stack_target_dir is match('^/(opt|srv)/deploy-invariant-ops/[A-Za-z0-9._/-]+$')
+      - "'/../' not in stack_target_dir"
+      - "'/./' not in stack_target_dir"
+      - "'//' not in stack_target_dir"
+      - not stack_target_dir.endswith('/..')
+      - not stack_target_dir.endswith('/.')
+      - stack_compose_dest is match('^[A-Za-z0-9._-]+$')
+      - stack_managed_files | length > 0
+      - stack_expected_services | length > 0
+      - stack_functional_checks | length > 0
+      - stack_compose_dest in (stack_managed_files | map(attribute='dest') | list)
+      - "'defaults.env' in (stack_managed_files | map(attribute='dest') | list)"
+    fail_msg: Stack contract contains an unsafe target or lacks required checks.
+
+- name: Validate current managed file entries
+  ansible.builtin.assert:
+    that:
+      - item.src is defined
+      - item.dest is defined
+      - item.mode is defined
+      - item.src is string
+      - item.dest is string
+      - item.mode is string
+      - item.src is match('^[A-Za-z0-9._/-]+$')
+      - item.dest is match('^[A-Za-z0-9._/-]+$')
+      - not item.src.startswith('/')
+      - not item.dest.startswith('/')
+      - "'..' not in item.src.split('/')"
+      - "'.' not in item.src.split('/')"
+      - "'..' not in item.dest.split('/')"
+      - "'.' not in item.dest.split('/')"
+      - "'//' not in item.src"
+      - "'//' not in item.dest"
+      - not item.src.endswith('/')
+      - not item.dest.endswith('/')
+      - item.mode is match('^0[0-7]{3}$')
+    fail_msg: Stack contract contains an unsafe managed file entry.
+  loop: "{{ stack_managed_files }}"
+  loop_control:
+    label: "{{ item.dest | default('invalid-entry') }}"
+
+- name: Determine whether a previous accepted state exists
+  ansible.builtin.set_fact:
+    stack_previous_contract_available: "{{ deploy_invariant_previous_accepted_commit | length > 0 }}"
+
+- name: Require consistent frozen previous-state metadata
+  ansible.builtin.assert:
+    that:
+      - >-
+        (stack_previous_contract_available | bool and
+         deploy_invariant_previous_record_id | length == 64 and
+         deploy_invariant_previous_record_source is defined and
+         deploy_invariant_previous_record_source | length > 0 and
+         deploy_invariant_previous_release_root | length > 0)
+        or
+        (not (stack_previous_contract_available | bool) and
+         deploy_invariant_previous_record_id == '' and
+         deploy_invariant_previous_release_root == '')
+    fail_msg: Frozen previous accepted-state metadata is incomplete.
+
+- name: Load exact prior contract from frozen transaction snapshot
+  ansible.builtin.include_vars:
+    file: "{{ deploy_invariant_previous_release_root }}/stacks/{{ stack_name }}/stack.yml"
+    name: stack_previous_contract
+  when: stack_previous_contract_available | bool
+
+- name: Validate prior release rollback boundary
+  ansible.builtin.assert:
+    that:
+      - stack_previous_contract is mapping
+      - stack_previous_contract.stack_target_dir == stack_target_dir
+      - stack_previous_contract.stack_compose_dest is match('^[A-Za-z0-9._-]+$')
+      - stack_previous_contract.stack_managed_files | length > 0
+      - stack_previous_contract.stack_expected_services | length > 0
+      - stack_previous_contract.stack_functional_checks | length > 0
+    fail_msg: >-
+      Prior release contract is unavailable or incompatible with the current
+      target. Refusing an unverified automatic rollback boundary.
+  when: stack_previous_contract_available | bool
+
+- name: Validate prior managed file entries
+  ansible.builtin.assert:
+    that:
+      - item.src is defined
+      - item.dest is defined
+      - item.mode is defined
+      - item.src is string
+      - item.dest is string
+      - item.mode is string
+      - item.src is match('^[A-Za-z0-9._/-]+$')
+      - item.dest is match('^[A-Za-z0-9._/-]+$')
+      - not item.src.startswith('/')
+      - not item.dest.startswith('/')
+      - "'..' not in item.src.split('/')"
+      - "'.' not in item.src.split('/')"
+      - "'..' not in item.dest.split('/')"
+      - "'.' not in item.dest.split('/')"
+      - "'//' not in item.src"
+      - "'//' not in item.dest"
+      - not item.src.endswith('/')
+      - not item.dest.endswith('/')
+      - item.mode is match('^0[0-7]{3}$')
+    fail_msg: Prior release contract contains an unsafe managed file entry.
+  loop: "{{ stack_previous_contract.stack_managed_files }}"
+  loop_control:
+    label: "{{ item.dest | default('invalid-entry') }}"
+  when: stack_previous_contract_available | bool
+
+- name: Set exact transaction boundaries
+  ansible.builtin.set_fact:
+    stack_candidate_dir: "{{ deploy_invariant_candidate_dir }}/{{ stack_name }}-{{ deploy_invariant_transaction_id }}"
+    stack_rollback_dir: >-
+      {{ deploy_invariant_candidate_dir }}/{{ stack_name }}-{{ deploy_invariant_transaction_id }}-rollback
+    stack_previous_managed_files: >-
+      {{
+        stack_previous_contract.stack_managed_files
+        if stack_previous_contract_available | bool
+        else []
+      }}
+    stack_previous_managed_dests: >-
+      {{
+        stack_previous_contract.stack_managed_files
+        | map(attribute='dest') | list
+        if stack_previous_contract_available | bool
+        else []
+      }}
+    stack_current_managed_dests: "{{ stack_managed_files | map(attribute='dest') | list }}"
+    stack_unresolved_marker: "{{ deploy_invariant_transaction_state_dir }}/{{ stack_name }}.unresolved"
+    stack_prepared_marker_source: >-
+      {{ deploy_invariant_transaction_state_dir }}/{{ stack_name }}.{{ deploy_invariant_transaction_id }}.prepared
+    stack_mutation_started: false
+    stack_runtime_verified: false
+    stack_acceptance_committed: false
+    stack_transaction_resolved: false
+
+- name: Determine files introduced only by the candidate release
+  ansible.builtin.set_fact:
+    stack_candidate_only_dests: >-
+      {{ stack_current_managed_dests | difference(stack_previous_managed_dests) }}
+
+- name: Determine files no longer managed by the candidate release
+  ansible.builtin.set_fact:
+    stack_retired_dests: >-
+      {{ stack_previous_managed_dests | difference(stack_current_managed_dests) }}
+
+- name: Create durable transaction state directory
+  ansible.builtin.file:
+    path: "{{ deploy_invariant_transaction_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: not ansible_check_mode
+
+- name: Stage prepared transaction marker before target-side staging
+  ansible.builtin.copy:
+    dest: "{{ stack_prepared_marker_source }}"
+    owner: root
+    group: root
+    mode: "0600"
+    backup: false
+    content: |
+      transaction_id={{ deploy_invariant_transaction_id }}
+      stack={{ stack_name }}
+      candidate_commit={{ deploy_invariant_release_commit }}
+      previous_accepted_commit={{ deploy_invariant_previous_accepted_commit }}
+      previous_record_id={{ deploy_invariant_previous_record_id }}
+      phase=PREPARED
+  when: not ansible_check_mode
+
+- name: Commit prepared transaction marker durably
+  ansible.builtin.script:
+    cmd: >-
+      {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+      commit
+      --source {{ stack_prepared_marker_source }}
+      --destination {{ stack_unresolved_marker }}
+      --mode 0600
+    executable: /usr/bin/python3
+  changed_when: true
+  when: not ansible_check_mode
+
+- name: Remove prepared marker staging file
+  ansible.builtin.file:
+    path: "{{ stack_prepared_marker_source }}"
+    state: absent
+  when: not ansible_check_mode
+
+- name: Validate and deploy candidate transaction
+  block:
+    - name: Create candidate directory
+      ansible.builtin.file:
+        path: "{{ stack_candidate_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      check_mode: false
+
+    - name: Create candidate managed parent directories
+      ansible.builtin.file:
+        path: "{{ stack_candidate_dir }}/{{ item.dest | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop: "{{ stack_managed_files }}"
+      when: (item.dest | dirname) != '.'
+      check_mode: false
+
+    - name: Copy managed files to candidate
+      ansible.builtin.copy:
+        src: "{{ stack_source_dir }}/{{ item.src }}"
+        dest: "{{ stack_candidate_dir }}/{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+        backup: false
+      loop: "{{ stack_managed_files }}"
+      check_mode: false
+
+    - name: Render candidate image list
+      ansible.builtin.command:
+        argv: >-
+          {{ deploy_invariant_clean_docker_argv +
+             ['compose', '--env-file', stack_candidate_dir + '/defaults.env',
+              '-f', stack_candidate_dir + '/' + stack_compose_dest,
+              'config', '--images'] }}
+      register: managed_stack_images
+      changed_when: false
+      check_mode: false
+
+    - name: Refuse mutable or unpinned images
+      ansible.builtin.assert:
+        that:
+          - managed_stack_images.stdout_lines | length > 0
+          - >-
+            managed_stack_images.stdout_lines
+            | select('match', '^.+@sha256:[0-9a-f]{64}$')
+            | list | length == managed_stack_images.stdout_lines | length
+        fail_msg: Every managed image must use an immutable @sha256 digest.
+
+    - name: Validate candidate Compose model
+      ansible.builtin.command:
+        argv: >-
+          {{ deploy_invariant_clean_docker_argv +
+             ['compose', '--env-file', stack_candidate_dir + '/defaults.env',
+              '-f', stack_candidate_dir + '/' + stack_compose_dest,
+              'config', '--quiet'] }}
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Determine whether automatic rollback is available
+      ansible.builtin.set_fact:
+        stack_rollback_available: >-
+          {{
+            not ansible_check_mode
+            and stack_previous_contract_available
+          }}
+
+    - name: Create transient rollback directory
+      ansible.builtin.file:
+        path: "{{ stack_rollback_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: stack_rollback_available | bool
+
+    - name: Create rollback parent directories
+      ansible.builtin.file:
+        path: "{{ stack_rollback_dir }}/{{ item.dest | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop: "{{ stack_previous_managed_files }}"
+      when:
+        - stack_rollback_available | bool
+        - (item.dest | dirname) != '.'
+
+    - name: Stage frozen prior managed files for transaction rollback
+      ansible.builtin.copy:
+        src: "{{ deploy_invariant_previous_release_root }}/stacks/{{ stack_name }}/{{ item.src }}"
+        dest: "{{ stack_rollback_dir }}/{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+        backup: false
+      loop: "{{ stack_previous_managed_files }}"
+      when: stack_rollback_available | bool
+
+    - name: Stage exact frozen prior contract for rollback verification
+      ansible.builtin.copy:
+        src: "{{ deploy_invariant_previous_release_root }}/stacks/{{ stack_name }}/stack.yml"
+        dest: "{{ stack_rollback_dir }}/stack.yml"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: false
+      when: stack_rollback_available | bool
+
+    - name: Stage previous accepted record for interruption recovery
+      ansible.builtin.copy:
+        src: "{{ deploy_invariant_previous_record_source }}"
+        dest: "{{ stack_rollback_dir }}/previous.record"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: false
+      when: stack_rollback_available | bool
+
+    - name: Stage candidate contract before managed mutation
+      ansible.builtin.copy:
+        src: "{{ stack_source_dir }}/stack.yml"
+        dest: "{{ stack_candidate_dir }}/stack.yml"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: false
+      when: not ansible_check_mode
+
+    - name: Stage unresolved transaction marker
+      ansible.builtin.copy:
+        dest: "{{ stack_candidate_dir }}/transaction.unresolved"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: false
+        content: |
+          transaction_id={{ deploy_invariant_transaction_id }}
+          stack={{ stack_name }}
+          candidate_commit={{ deploy_invariant_release_commit }}
+          previous_accepted_commit={{ deploy_invariant_previous_accepted_commit }}
+          previous_record_id={{ deploy_invariant_previous_record_id }}
+          phase=MUTATING
+      when: not ansible_check_mode
+
+    - name: Commit unresolved transaction marker durably before mutation
+      ansible.builtin.script:
+        cmd: >-
+          {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+          commit
+          --source {{ stack_candidate_dir }}/transaction.unresolved
+          --destination {{ stack_unresolved_marker }}
+          --mode 0600
+        executable: /usr/bin/python3
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Mark managed mutation boundary as crossed
+      ansible.builtin.set_fact:
+        stack_mutation_started: true
+      when: not ansible_check_mode
+
+    - name: Create exact target directory
+      ansible.builtin.file:
+        path: "{{ stack_target_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Create managed target parent directories
+      ansible.builtin.file:
+        path: "{{ stack_target_dir }}/{{ item.dest | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      loop: "{{ stack_managed_files }}"
+      when: (item.dest | dirname) != '.'
+
+    - name: Install allowlisted managed files atomically
+      ansible.builtin.copy:
+        src: "{{ stack_candidate_dir }}/{{ item.dest }}"
+        dest: "{{ stack_target_dir }}/{{ item.dest }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+        backup: false
+      loop: "{{ stack_managed_files }}"
+
+    - name: Remove files no longer managed by the candidate
+      ansible.builtin.file:
+        path: "{{ stack_target_dir }}/{{ item }}"
+        state: absent
+      loop: "{{ stack_retired_dests }}"
+
+    - name: Pause after managed mutation for interruption proof
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/sleep
+          - "300"
+      changed_when: false
+      when:
+        - not ansible_check_mode
+        - deploy_invariant_environment == 'lab'
+        - lookup('env', 'DEPLOY_INVARIANT_LAB_INTERRUPT_TEST') == 'mutation'
+
+    - name: Apply Compose model
+      ansible.builtin.command:
+        argv: >-
+          {{ deploy_invariant_clean_docker_argv +
+             ['compose', '--env-file', stack_target_dir + '/defaults.env',
+              '-f', stack_target_dir + '/' + stack_compose_dest,
+              'up', '-d', '--remove-orphans'] }}
+      register: managed_stack_up
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Read running Compose services
+      ansible.builtin.command:
+        argv: >-
+          {{ deploy_invariant_clean_docker_argv +
+             ['compose', '--env-file', stack_target_dir + '/defaults.env',
+              '-f', stack_target_dir + '/' + stack_compose_dest,
+              'ps', '--status', 'running', '--services'] }}
+      register: managed_stack_running
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Require every expected service to be running
+      ansible.builtin.assert:
+        that:
+          - stack_expected_services | difference(managed_stack_running.stdout_lines) | length == 0
+        fail_msg: One or more expected Compose services are not running.
+      when: not ansible_check_mode
+
+    - name: Run functional stack verification on the target
+      # The verifier needs the target Docker daemon. The script module transfers
+      # it, while the contract is staged above, so no target checkout is needed.
+      ansible.builtin.script:
+        cmd: >-
+          {{ deploy_invariant_repo_root }}/scripts/verify-compose-health.py
+          --stack-dir {{ stack_target_dir }}
+          --compose-file {{ stack_compose_dest }}
+          --env-file defaults.env
+          --contract {{ stack_candidate_dir }}/stack.yml
+        executable: /usr/bin/python3
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Mark candidate runtime as functionally verified
+      ansible.builtin.set_fact:
+        stack_runtime_verified: true
+      when: not ansible_check_mode
+
+    - name: Stage acceptance-pending transaction marker
+      ansible.builtin.copy:
+        dest: "{{ stack_candidate_dir }}/transaction.acceptance-pending"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: false
+        content: |
+          transaction_id={{ deploy_invariant_transaction_id }}
+          stack={{ stack_name }}
+          candidate_commit={{ deploy_invariant_release_commit }}
+          previous_accepted_commit={{ deploy_invariant_previous_accepted_commit }}
+          previous_record_id={{ deploy_invariant_previous_record_id }}
+          phase=ACCEPTANCE_PENDING
+      when: not ansible_check_mode
+
+    - name: Commit acceptance-pending marker durably
+      ansible.builtin.script:
+        cmd: >-
+          {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+          commit
+          --source {{ stack_candidate_dir }}/transaction.acceptance-pending
+          --destination {{ stack_unresolved_marker }}
+          --mode 0600
+        executable: /usr/bin/python3
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Create deployment record directory
+      ansible.builtin.file:
+        path: "{{ deploy_invariant_deployment_record_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      when: not ansible_check_mode
+
+    - name: Stage accepted transaction provenance
+      ansible.builtin.copy:
+        dest: "{{ stack_candidate_dir }}/acceptance.record"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: false
+        content: |
+          stack={{ stack_name }}
+          commit={{ deploy_invariant_release_commit }}
+          tooling_commit={{ deploy_invariant_tooling_commit }}
+          transaction_id={{ deploy_invariant_transaction_id }}
+          contract_hash={{ deploy_invariant_contract_hash }}
+          manifest_hash={{ deploy_invariant_manifest_hash }}
+          previous_commit={{ deploy_invariant_previous_accepted_commit }}
+          previous_record_id={{ deploy_invariant_previous_record_id }}
+          target={{ stack_target_dir }}
+          target_hostname={{ deploy_invariant_expected_hostname }}
+          target_machine_id={{ deploy_invariant_expected_machine_id | default('', true) }}
+          verified=functional
+      when: not ansible_check_mode
+
+    - name: Commit acceptance record atomically and durably
+      ansible.builtin.script:
+        cmd: >-
+          {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+          commit
+          --source {{ stack_candidate_dir }}/acceptance.record
+          --destination {{ deploy_invariant_deployment_record_dir }}/{{ stack_name }}.record
+          --mode 0640
+          {{
+            '--test-fail-before-rename'
+            if deploy_invariant_environment == 'lab'
+            and lookup('env', 'DEPLOY_INVARIANT_LAB_ACCEPTANCE_FAILURE_TEST') == '1'
+            else ''
+          }}
+        executable: /usr/bin/python3
+      changed_when: true
+      when: not ansible_check_mode
+
+    - name: Mark durable acceptance commit point reached
+      ansible.builtin.set_fact:
+        stack_acceptance_committed: true
+        stack_transaction_resolved: true
+      when: not ansible_check_mode
+
+    - name: Hash durable acceptance record for interruption proof
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/sha256sum
+          - "{{ deploy_invariant_deployment_record_dir }}/{{ stack_name }}.record"
+      register: stack_acceptance_record_hash
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Stage durable acceptance receipt
+      ansible.builtin.copy:
+        dest: "{{ stack_candidate_dir }}/acceptance.receipt"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: false
+        content: |
+          transaction_id={{ deploy_invariant_transaction_id }}
+          record_sha256={{ stack_acceptance_record_hash.stdout.split()[0] }}
+      failed_when: false
+      when:
+        - not ansible_check_mode
+        - stack_acceptance_record_hash.rc | default(1) == 0
+
+    - name: Commit durable acceptance receipt
+      ansible.builtin.script:
+        cmd: >-
+          {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+          commit
+          --source {{ stack_candidate_dir }}/acceptance.receipt
+          --destination {{ deploy_invariant_deployment_record_dir }}/{{ stack_name }}.receipt
+          --mode 0640
+        executable: /usr/bin/python3
+      register: stack_acceptance_receipt_commit
+      changed_when: stack_acceptance_receipt_commit.rc == 0
+      failed_when: false
+      when:
+        - not ansible_check_mode
+        - stack_acceptance_record_hash.rc | default(1) == 0
+
+    - name: Report durable acceptance
+      ansible.builtin.debug:
+        msg: >-
+          ACCEPTED: functional verification passed and the acceptance record
+          was committed durably.
+      when: not ansible_check_mode
+
+    - name: Clear unresolved marker after durable acceptance
+      ansible.builtin.script:
+        cmd: >-
+          {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+          remove
+          --path {{ stack_unresolved_marker }}
+        executable: /usr/bin/python3
+      register: stack_marker_cleanup
+      changed_when: stack_marker_cleanup.rc == 0
+      failed_when: false
+      when:
+        - not ansible_check_mode
+        - not (
+            deploy_invariant_environment == 'lab'
+            and lookup('env', 'DEPLOY_INVARIANT_LAB_STALE_MARKER_TEST') == '1'
+          )
+
+    - name: Warn when an accepted transaction leaves a stale marker
+      ansible.builtin.debug:
+        msg: >-
+          ACCEPTED: the deployment record is durable, but the unresolved marker
+          could not be cleared. A later transaction will remain blocked until
+          the marker is reconciled manually.
+      when:
+        - not ansible_check_mode
+        - >-
+          stack_marker_cleanup.rc | default(1) != 0
+          or
+          (
+            deploy_invariant_environment == 'lab'
+            and lookup('env', 'DEPLOY_INVARIANT_LAB_STALE_MARKER_TEST') == '1'
+          )
+
+  rescue:
+    - name: Stage explicit acceptance-persistence failure marker
+      ansible.builtin.copy:
+        dest: "{{ stack_candidate_dir }}/transaction.acceptance-failed"
+        owner: root
+        group: root
+        mode: "0600"
+        backup: false
+        content: |
+          transaction_id={{ deploy_invariant_transaction_id }}
+          stack={{ stack_name }}
+          candidate_commit={{ deploy_invariant_release_commit }}
+          previous_accepted_commit={{ deploy_invariant_previous_accepted_commit }}
+          previous_record_id={{ deploy_invariant_previous_record_id }}
+          phase=ACCEPTANCE_PERSISTENCE_FAILED
+      failed_when: false
+      when:
+        - stack_runtime_verified | default(false) | bool
+        - not (stack_acceptance_committed | default(false) | bool)
+
+    - name: Commit explicit acceptance-persistence failure marker
+      ansible.builtin.script:
+        cmd: >-
+          {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+          commit
+          --source {{ stack_candidate_dir }}/transaction.acceptance-failed
+          --destination {{ stack_unresolved_marker }}
+          --mode 0600
+        executable: /usr/bin/python3
+      failed_when: false
+      changed_when: false
+      when:
+        - stack_runtime_verified | default(false) | bool
+        - not (stack_acceptance_committed | default(false) | bool)
+
+    - name: Fail closed when acceptance persistence fails after runtime verification
+      ansible.builtin.fail:
+        msg: >-
+          ACCEPTANCE_PERSISTENCE_FAILED: runtime verification passed but durable
+          acceptance could not be committed. The candidate is not accepted,
+          automatic rollback is intentionally not attempted, and the unresolved
+          transaction marker blocks new transactions pending operator
+          reconciliation. Original failure:
+          {{ ansible_failed_result.msg | default(ansible_failed_result) }}
+      when:
+        - stack_runtime_verified | default(false) | bool
+        - not (stack_acceptance_committed | default(false) | bool)
+
+    - name: Refuse failures that occurred before managed mutation
+      ansible.builtin.fail:
+        msg: >-
+          PRE_MUTATION_REFUSAL: transaction preparation failed before managed
+          Production mutation began. Original failure:
+          {{ ansible_failed_result.msg | default(ansible_failed_result) }}
+      when:
+        - not (stack_runtime_verified | default(false) | bool)
+        - not (stack_mutation_started | default(false) | bool)
+
+    - name: Refuse an unprotected deployment failure
+      ansible.builtin.fail:
+        msg: >-
+          REJECTED_ROLLBACK_FAILED: candidate deployment failed after managed
+          mutation, but no verified automatic rollback target exists. The
+          target remains unresolved. Original failure:
+          {{ ansible_failed_result.msg | default(ansible_failed_result) }}
+      when: not (stack_rollback_available | default(false) | bool)
+
+    - name: Attempt verified rollback transaction
+      block:
+        - name: Stage restoring transaction marker
+          ansible.builtin.copy:
+            dest: "{{ stack_rollback_dir }}/transaction.restoring"
+            owner: root
+            group: root
+            mode: "0600"
+            backup: false
+            content: |
+              transaction_id={{ deploy_invariant_transaction_id }}
+              stack={{ stack_name }}
+              candidate_commit={{ deploy_invariant_release_commit }}
+              previous_accepted_commit={{ deploy_invariant_previous_accepted_commit }}
+              previous_record_id={{ deploy_invariant_previous_record_id }}
+              phase=RESTORING
+          when:
+            - stack_mutation_started | default(false) | bool
+            - stack_rollback_available | default(false) | bool
+
+        - name: Commit restoring marker before rollback mutation
+          ansible.builtin.script:
+            cmd: >-
+              {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+              commit
+              --source {{ stack_rollback_dir }}/transaction.restoring
+              --destination {{ stack_unresolved_marker }}
+              --mode 0600
+            executable: /usr/bin/python3
+          changed_when: true
+          when:
+            - stack_mutation_started | default(false) | bool
+            - stack_rollback_available | default(false) | bool
+
+        - name: Restore prior managed files
+          ansible.builtin.copy:
+            src: "{{ stack_rollback_dir }}/{{ item.dest }}"
+            dest: "{{ stack_target_dir }}/{{ item.dest }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "{{ item.mode }}"
+            backup: false
+          loop: "{{ stack_previous_managed_files }}"
+          when: stack_rollback_available | default(false) | bool
+
+        - name: Remove files introduced only by failed candidate
+          ansible.builtin.file:
+            path: "{{ stack_target_dir }}/{{ item }}"
+            state: absent
+          loop: "{{ stack_candidate_only_dests }}"
+          when: stack_rollback_available | default(false) | bool
+
+        - name: Reapply prior Compose model
+          ansible.builtin.command:
+            argv: >-
+              {{ deploy_invariant_clean_docker_argv +
+                 ['compose', '--env-file', stack_target_dir + '/defaults.env',
+                  '-f', stack_target_dir + '/' + stack_previous_contract.stack_compose_dest,
+                  'up', '-d', '--remove-orphans'] }}
+          changed_when: true
+          when: stack_rollback_available | default(false) | bool
+
+        - name: Read running services after restoring prior release
+          ansible.builtin.command:
+            argv: >-
+              {{ deploy_invariant_clean_docker_argv +
+                 ['compose', '--env-file', stack_target_dir + '/defaults.env',
+                  '-f', stack_target_dir + '/' + stack_previous_contract.stack_compose_dest,
+                  'ps', '--status', 'running', '--services'] }}
+          register: stack_previous_running
+          changed_when: false
+          when: stack_rollback_available | default(false) | bool
+
+        - name: Require prior release services to be running
+          ansible.builtin.assert:
+            that:
+              - >-
+                stack_previous_contract.stack_expected_services
+                | difference(stack_previous_running.stdout_lines) | length == 0
+            fail_msg: One or more services from the restored release are not running.
+          when: stack_rollback_available | default(false) | bool
+
+        - name: Verify restored prior release on the target
+          ansible.builtin.script:
+            cmd: >-
+              {{ deploy_invariant_repo_root }}/scripts/verify-compose-health.py
+              --stack-dir {{ stack_target_dir }}
+              --compose-file {{ stack_previous_contract.stack_compose_dest }}
+              --env-file defaults.env
+              --contract {{ stack_rollback_dir }}/stack.yml
+            executable: /usr/bin/python3
+          changed_when: false
+          when: stack_rollback_available | default(false) | bool
+
+        - name: Clear unresolved marker after verified rollback
+          ansible.builtin.script:
+            cmd: >-
+              {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+              remove
+              --path {{ stack_unresolved_marker }}
+            executable: /usr/bin/python3
+          changed_when: true
+          when: stack_rollback_available | default(false) | bool
+
+        - name: Mark transaction resolved after verified rollback
+          ansible.builtin.set_fact:
+            stack_transaction_resolved: true
+          when: stack_rollback_available | default(false) | bool
+
+      rescue:
+        - name: Report rollback or re-verification failure
+          ansible.builtin.fail:
+            msg: >-
+              REJECTED_ROLLBACK_FAILED: candidate deployment failed and the
+              previous accepted configuration could not be fully restored and
+              functionally reverified. The durable RESTORING marker and
+              target-local recovery material are retained for operator
+              reconciliation. Rollback failure:
+              {{ ansible_failed_result.msg | default(ansible_failed_result) }}
+      when: stack_rollback_available | default(false) | bool
+
+    - name: Report failed deployment with successful rollback
+      ansible.builtin.fail:
+        msg: >-
+          REJECTED_ROLLBACK_VERIFIED: candidate deployment failed and the prior
+          managed files were restored, reapplied and functionally verified with
+          their exact Git contract. Original failure:
+          {{ ansible_failed_result.msg | default(ansible_failed_result) }}
+      when: stack_rollback_available | default(false) | bool
+
+  always:
+    - name: Remove exact candidate directory only when transaction is resolved
+      ansible.builtin.file:
+        path: "{{ stack_candidate_dir }}"
+        state: absent
+      check_mode: false
+      when:
+        - not (stack_mutation_started | default(false) | bool)
+          or (stack_transaction_resolved | default(false) | bool)
+
+    - name: Remove transient rollback directory only when transaction is resolved
+      ansible.builtin.file:
+        path: "{{ stack_rollback_dir }}"
+        state: absent
+      check_mode: false
+      when:
+        - not (stack_mutation_started | default(false) | bool)
+          or (stack_transaction_resolved | default(false) | bool)

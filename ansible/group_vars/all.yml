@@ -1,0 +1,10 @@
+---
+deploy_invariant_deployment_record_dir: /etc/deploy-invariant-ops/deployments
+deploy_invariant_candidate_dir: /var/lib/deploy-invariant-ops/candidates
+deploy_invariant_transaction_state_dir: /var/lib/deploy-invariant-ops/transactions
+deploy_invariant_clean_docker_argv:
+  - /usr/bin/env
+  - -i
+  - HOME=/root
+  - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  - /usr/bin/docker

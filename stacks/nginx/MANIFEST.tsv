@@ -1,0 +1,2 @@
+compose.yaml	/opt/deploy-invariant-ops/stacks/nginx/docker-compose.yml
+defaults.env	/opt/deploy-invariant-ops/stacks/nginx/defaults.env
