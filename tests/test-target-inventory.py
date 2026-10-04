@@ -18,12 +18,13 @@ def run(
     path: Path,
     environment: str,
     extra_env: dict[str, str] | None = None,
+    extra_args: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        ["python3", str(VALIDATOR), str(path), "--environment", environment],
+        ["python3", str(VALIDATOR), str(path), "--environment", environment, *extra_args],
         text=True,
         capture_output=True,
         env=env,
@@ -131,6 +132,42 @@ all:
 """,
     )
     expect_ok(run(inventory, "lab"))
+    expect_fail(
+        run(inventory, "lab", extra_args=("--require-ssh", "--single-host")),
+        "must use the ssh connection plugin",
+    )
+
+    remote = """---
+all:
+  hosts:
+    lab:
+      ansible_connection: ssh
+      ansible_host: example.invalid
+      deploy_invariant_environment: lab
+      deploy_invariant_expected_hostname: disposable-lab
+"""
+    write_inventory(inventory, remote)
+    remote_args = ("--require-ssh", "--single-host", "--outside-repository", str(ROOT))
+    expect_ok(run(inventory, "lab", extra_args=remote_args))
+    expect_fail(
+        run(inventory, "lab", {"ANSIBLE_SSH_ARGS": "-o StrictHostKeyChecking=no"}, remote_args),
+        "weakens SSH host-key verification",
+    )
+    write_inventory(inventory, remote.replace("ansible_host:", "ansible_host_key_checking: false\n      ansible_host:"))
+    expect_fail(run(inventory, "lab", extra_args=remote_args), "host-key checking must not be disabled")
+    write_inventory(inventory, remote + "    second:\n      ansible_connection: ssh\n")
+    expect_fail(run(inventory, "lab", extra_args=remote_args), "exactly one host")
+    write_inventory(inventory, remote)
+    expect_fail(
+        run(inventory, "lab", extra_args=("--outside-repository", str(root))),
+        "outside the repository tree",
+    )
+    alias = root / "alias.yml"
+    alias.symlink_to(inventory)
+    expect_fail(
+        run(alias, "lab", extra_args=("--outside-repository", str(root))),
+        "outside the repository tree",
+    )
 
 print(
     "Target inventory policy tests passed: Production SSH is mandatory, "

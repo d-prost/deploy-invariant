@@ -7,6 +7,13 @@
     - "{{ playbook_dir }}/../group_vars/all.yml"
   vars:
     stack_source_dir: "{{ deploy_invariant_release_root }}/stacks/{{ stack_name }}"
+    # Rendering runs without target privileges or the target's root HOME.
+    control_docker_argv:
+      - /usr/bin/env
+      - -i
+      - "HOME={{ lookup('env', 'HOME') }}"
+      - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - /usr/bin/docker
 
   pre_tasks:
     - name: Require a selected stack and explicit payload roots
@@ -57,10 +64,11 @@
       # control plane because a remote target must not require a Git checkout.
       ansible.builtin.command:
         argv: >-
-          {{ deploy_invariant_clean_docker_argv +
+          {{ control_docker_argv +
              ['compose', '--env-file', stack_source_dir + '/defaults.env',
               '-f', stack_source_dir + '/compose.yaml', 'config', '--images'] }}
       delegate_to: localhost
+      become: false
       register: rendered_images
       changed_when: false
       check_mode: false
@@ -79,10 +87,11 @@
       # This is payload validation, not a target Runtime check.
       ansible.builtin.command:
         argv: >-
-          {{ deploy_invariant_clean_docker_argv +
+          {{ control_docker_argv +
              ['compose', '--env-file', stack_source_dir + '/defaults.env',
               '-f', stack_source_dir + '/compose.yaml', 'config', '--quiet'] }}
       delegate_to: localhost
+      become: false
       changed_when: false
       check_mode: false
       no_log: true

@@ -52,7 +52,9 @@ def inventory_hostvars(path: Path) -> dict[str, dict]:
     return hostvars
 
 
-def validate_host(name: str, values: dict, environment: str) -> None:
+def validate_host(
+    name: str, values: dict, environment: str, require_ssh: bool = False
+) -> None:
     if values.get("deploy_invariant_environment") != environment:
         raise InventoryError(
             f"{name}: deploy_invariant_environment must be exactly {environment!r}"
@@ -75,13 +77,13 @@ def validate_host(name: str, values: dict, environment: str) -> None:
             f"{name}: deploy_invariant_expected_machine_id must be null or 32 lowercase hex characters"
         )
 
-    if environment != "production":
+    if environment != "production" and not require_ssh:
         return
 
     connection = values.get("ansible_connection", "ssh")
     if connection != "ssh":
         raise InventoryError(
-            f"{name}: Production targets must use the ssh connection plugin, got {connection!r}"
+            f"{name}: {environment} targets must use the ssh connection plugin, got {connection!r}"
         )
 
     host_key_setting = values.get("ansible_host_key_checking")
@@ -120,19 +122,29 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("inventory", type=Path)
     parser.add_argument("--environment", choices=("production", "lab"), required=True)
+    parser.add_argument("--require-ssh", action="store_true")
+    parser.add_argument("--single-host", action="store_true")
+    parser.add_argument("--outside-repository", type=Path)
     args = parser.parse_args()
 
     if not args.inventory.is_file():
         raise InventoryError(f"inventory is not readable: {args.inventory}")
 
-    if args.environment == "production":
+    if args.outside_repository and args.inventory.resolve().is_relative_to(
+        args.outside_repository.resolve()
+    ):
+        raise InventoryError("private inventory must stay outside the repository tree")
+
+    if args.environment == "production" or args.require_ssh:
         validate_environment_ssh_args()
 
     hostvars = inventory_hostvars(args.inventory)
+    if args.single_host and len(hostvars) != 1:
+        raise InventoryError("remote proof requires exactly one host")
     for name, values in sorted(hostvars.items()):
         if not isinstance(values, dict):
             raise InventoryError(f"{name}: host variables must be a mapping")
-        validate_host(name, values, args.environment)
+        validate_host(name, values, args.environment, args.require_ssh)
 
     print(
         f"Target inventory identity guard passed: {len(hostvars)} "

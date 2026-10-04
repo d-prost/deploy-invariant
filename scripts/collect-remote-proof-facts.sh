@@ -38,48 +38,46 @@ done
 export ANSIBLE_CONFIG="$repo_root/ansible/ansible.cfg"
 export ANSIBLE_HOST_KEY_CHECKING=True
 
-python3 - "$inventory" <<'PY'
-import json
-import subprocess
-import sys
-
-inventory = sys.argv[1]
-result = subprocess.run(
-    ["ansible-inventory", "-i", inventory, "--list"],
-    text=True,
-    capture_output=True,
-)
-if result.returncode:
-    raise SystemExit(result.stderr or result.stdout)
-doc = json.loads(result.stdout)
-hostvars = doc.get("_meta", {}).get("hostvars", {})
-if len(hostvars) != 1:
-    raise SystemExit(f"ERROR: remote proof requires exactly one host, got {len(hostvars)}")
-name, values = next(iter(hostvars.items()))
-if values.get("ansible_connection", "ssh") != "ssh":
-    raise SystemExit("ERROR: remote proof target must use SSH")
-if values.get("deploy_invariant_environment") != "lab":
-    raise SystemExit("ERROR: remote proof inventory must classify the target as lab")
-if not values.get("deploy_invariant_expected_hostname"):
-    raise SystemExit("ERROR: deploy_invariant_expected_hostname is required")
-print("Inventory policy: PASS (one separate SSH lab target)")
-PY
+python3 "$repo_root/scripts/validate-target-inventory.py" "$inventory" \
+  --environment lab --require-ssh --single-host --outside-repository "$repo_root" >/dev/null
+printf 'Inventory policy: PASS (one separate SSH lab target)\n'
 
 ansible-playbook -i "$inventory" "$repo_root/ansible/playbooks/preflight.yml"   -e stack_name=dozzle   -e "deploy_invariant_repo_root=$repo_root"   -e "deploy_invariant_release_root=$repo_root" >/dev/null
 
 printf 'Target identity + Docker preflight: PASS\n'
 printf 'Topology: separate SSH target\n'
 printf 'Control Ansible: '
-ansible --version | head -n1 | sed -E 's/\[[^]]*\]//g'
+python3 -c 'from ansible import __version__; print(__version__)'
+
+# Read module results rather than parsing a version-dependent console callback.
+facts_root="$(mktemp -d /tmp/deploy-invariant-remote-facts.XXXXXXXX)"
+trap 'rm -rf -- "$facts_root"' EXIT
+remote_stdout() {
+  ansible all -i "$inventory" -b -m "$1" -a "$2" --tree "$facts_root" >/dev/null
+  python3 - "$facts_root" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+files = list(Path(sys.argv[1]).iterdir())
+if len(files) != 1:
+    raise SystemExit("ERROR: expected one remote facts result")
+result = json.loads(files[0].read_text())
+if result.get("failed") or result.get("unreachable") or result.get("rc", 0):
+    raise SystemExit("ERROR: remote facts command failed")
+print(result["stdout"])
+PY
+}
 
 printf 'Target OS: '
-ansible all -i "$inventory" -b -m ansible.builtin.shell   -a ". /etc/os-release && printf '%s %s' \"\$NAME\" \"\$VERSION_ID\""   -o | sed -E 's/^[^|]+\|[^>]+>>[[:space:]]*//' | tail -n1
+remote_stdout ansible.builtin.shell ". /etc/os-release && printf '%s %s' \"\$NAME\" \"\$VERSION_ID\""
 
 printf 'Docker Engine: '
-ansible all -i "$inventory" -b -m ansible.builtin.command   -a '/usr/bin/docker version --format {{.Server.Version}}'   -o | sed -E 's/^[^|]+\|[^>]+>>[[:space:]]*//' | tail -n1
+remote_stdout ansible.builtin.command '/usr/bin/docker version --format json' \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["Server"]["Version"])'
 
 printf 'Docker Compose: '
-ansible all -i "$inventory" -b -m ansible.builtin.command   -a '/usr/bin/docker compose version --short'   -o | sed -E 's/^[^|]+\|[^>]+>>[[:space:]]*//' | tail -n1
+remote_stdout ansible.builtin.command '/usr/bin/docker compose version --short'
 
 printf 'Repository commit: %s\n' "$(git rev-parse HEAD)"
 printf 'Readiness collection complete. This is not the transaction proof; execute docs/REMOTE_SSH_PROOF.md before closing issue #3.\n'

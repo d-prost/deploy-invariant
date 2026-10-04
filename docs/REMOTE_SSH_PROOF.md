@@ -65,6 +65,18 @@ Raw inventory and raw Ansible output remain private.
 
 The current Dozzle reference stack is used as the baseline.
 
+From the clean control checkout, use the same private inventory as the collector:
+
+```bash
+export DEPLOY_INVARIANT_LAB_HOSTNAME='<exact-target-hostname>'
+bash scripts/deploy-stack.sh dozzle --inventory lab \
+  --inventory-file /absolute/path/to/private-hosts.yml
+```
+
+`--inventory-file` is restricted to one SSH target classified as `lab`. The
+inventory must be outside the repository, and SSH host-key verification must
+remain enabled. Production continues to use its normal inventory path.
+
 Record:
 
 - candidate commit;
@@ -77,6 +89,11 @@ The accepted record itself is not published.
 ## Failing candidate
 
 The failure fixture stays outside the tracked checkout and keeps images digest-pinned.
+
+Commit the fixture in a separate disposable worktree, retain its Git ref locally,
+then deploy it from the clean control checkout with `--ref <fixture-ref>` and
+the same `--inventory lab --inventory-file /absolute/path/to/private-hosts.yml`.
+Do not push the deliberate failure fixture to the public repository.
 
 The expected terminal result is:
 
