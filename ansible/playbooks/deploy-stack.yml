@@ -1,0 +1,59 @@
+---
+- name: Deploy one allowlisted HomeLab stack
+  hosts: all
+  gather_facts: false
+  become: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    stack_source_dir: "{{ deploy_invariant_release_root }}/stacks/{{ stack_name }}"
+
+  pre_tasks:
+    - name: Require explicit deployment metadata
+      ansible.builtin.assert:
+        that:
+          - stack_name is defined
+          - stack_name is match('^[a-z0-9][a-z0-9-]*$')
+          - deploy_invariant_release_commit is defined
+          - deploy_invariant_release_commit is match('^[0-9a-f]{40}$')
+          - deploy_invariant_tooling_commit is defined
+          - deploy_invariant_tooling_commit is match('^[0-9a-f]{40}$')
+          - deploy_invariant_transaction_id is defined
+          - deploy_invariant_transaction_id | length > 0
+          - deploy_invariant_contract_hash is defined
+          - deploy_invariant_contract_hash is match('^[0-9a-f]{64}$')
+          - deploy_invariant_manifest_hash is defined
+          - deploy_invariant_manifest_hash is match('^[0-9a-f]{64}$')
+          - deploy_invariant_previous_accepted_commit is defined
+          - deploy_invariant_previous_accepted_commit == '' or deploy_invariant_previous_accepted_commit is match('^[0-9a-f]{40}$')
+          - deploy_invariant_previous_record_id is defined
+          - deploy_invariant_previous_record_id == '' or deploy_invariant_previous_record_id is match('^[0-9a-f]{64}$')
+          - deploy_invariant_previous_record_source is defined
+          - deploy_invariant_previous_record_source == '' or deploy_invariant_previous_record_source is match('^/.+')
+          - deploy_invariant_previous_release_root is defined
+          - deploy_invariant_previous_release_root == '' or deploy_invariant_previous_release_root is match('^/.+')
+          - deploy_invariant_repo_root is defined
+          - deploy_invariant_repo_root is match('^/.+')
+          - deploy_invariant_release_root is defined
+          - deploy_invariant_release_root is match('^/.+')
+        fail_msg: >-
+          Frozen transaction metadata, exact commits and absolute control-plane
+          and payload roots are required.
+
+    - name: Verify declared target identity before any managed mutation
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/../tasks/verify-target-identity.yml"
+
+    - name: Load stack deployment contract
+      ansible.builtin.include_vars:
+        file: "{{ stack_source_dir }}/stack.yml"
+        name: deploy_invariant_stack_contract
+
+  roles:
+    - role: managed_stack
+      vars:
+        stack_target_dir: "{{ deploy_invariant_stack_contract.stack_target_dir }}"
+        stack_compose_dest: "{{ deploy_invariant_stack_contract.stack_compose_dest }}"
+        stack_expected_services: "{{ deploy_invariant_stack_contract.stack_expected_services }}"
+        stack_managed_files: "{{ deploy_invariant_stack_contract.stack_managed_files }}"
+        stack_functional_checks: "{{ deploy_invariant_stack_contract.stack_functional_checks }}"

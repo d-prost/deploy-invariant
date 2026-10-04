@@ -1,0 +1,63 @@
+---
+- name: Clean an interrupted transaction that never crossed mutation
+  hosts: all
+  gather_facts: false
+  become: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  vars:
+    prepared_candidate_dir: >-
+      {{ deploy_invariant_candidate_dir }}/{{ stack_name }}-{{ deploy_invariant_interrupted_transaction_id }}
+    prepared_rollback_dir: >-
+      {{ deploy_invariant_candidate_dir }}/{{ stack_name }}-{{ deploy_invariant_interrupted_transaction_id }}-rollback
+    prepared_marker_source: >-
+      {{ deploy_invariant_transaction_state_dir }}/{{ stack_name }}.{{ deploy_invariant_interrupted_transaction_id }}.prepared
+    prepared_marker: "{{ deploy_invariant_transaction_state_dir }}/{{ stack_name }}.unresolved"
+
+  pre_tasks:
+    - name: Require exact prepared interruption metadata
+      ansible.builtin.assert:
+        that:
+          - stack_name is defined
+          - stack_name is match('^[a-z0-9][a-z0-9-]*$')
+          - deploy_invariant_interrupted_transaction_id is defined
+          - deploy_invariant_interrupted_transaction_id is match('^[A-Za-z0-9._:-]+$')
+          - deploy_invariant_repo_root is defined
+          - deploy_invariant_repo_root is match('^/.+')
+        fail_msg: "INTERRUPTED_UNRESOLVED: exact PREPARED interruption metadata is required."
+
+    - name: Verify target identity before prepared cleanup
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/../tasks/verify-target-identity.yml"
+
+  tasks:
+    - name: Remove prepared candidate directory
+      ansible.builtin.file:
+        path: "{{ prepared_candidate_dir }}"
+        state: absent
+
+    - name: Remove prepared rollback directory
+      ansible.builtin.file:
+        path: "{{ prepared_rollback_dir }}"
+        state: absent
+
+    - name: Remove prepared marker staging file
+      ansible.builtin.file:
+        path: "{{ prepared_marker_source }}"
+        state: absent
+
+    - name: Clear PREPARED marker durably
+      ansible.builtin.script:
+        cmd: >-
+          {{ deploy_invariant_repo_root }}/scripts/durable-state-file.py
+          remove
+          --path {{ prepared_marker }}
+        executable: /usr/bin/python3
+      changed_when: true
+
+    - name: Report prepared interruption cleanup
+      ansible.builtin.debug:
+        msg: >-
+          PRE_MUTATION_REFUSAL resolved: interrupted PREPARED transaction
+          {{ deploy_invariant_interrupted_transaction_id }} had not crossed managed
+          mutation; transient target artifacts were removed without rollback.
