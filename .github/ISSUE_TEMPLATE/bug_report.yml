@@ -1,0 +1,39 @@
+---
+name: Bug report
+description: Report a reproducible problem.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: Remove credentials, private hostnames, addresses, URLs, secrets and recovery evidence before posting.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Observed behavior
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What behavior was expected?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Smallest command sequence or configuration needed to reproduce the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Relevant Docker, Compose, Ansible and OS versions.
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Non-sensitive validation output, logs or error messages.
