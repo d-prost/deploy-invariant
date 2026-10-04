@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 usage() {
-  printf 'Usage: %s STACK [--check] [--inventory production|lab] [--ref GIT_REF]\n' "$0" >&2
+  printf 'Usage: %s STACK [--check] [--inventory production|lab] [--inventory-file /absolute/private-hosts.yml] [--ref GIT_REF]\n' "$0" >&2
 }
 
 require_command() {
@@ -25,6 +25,7 @@ fi
 stack="$1"
 shift
 inventory="production"
+private_inventory=""
 git_ref="HEAD"
 check_mode=0
 
@@ -42,6 +43,11 @@ while (($#)); do
     --inventory)
       (($# >= 2)) || { usage; exit 2; }
       inventory="$2"
+      shift 2
+      ;;
+    --inventory-file)
+      (($# >= 2)) || { usage; exit 2; }
+      private_inventory="$2"
       shift 2
       ;;
     --ref)
@@ -69,9 +75,17 @@ case "$inventory" in
     ;;
 esac
 
-for required_command in ansible-inventory ansible-playbook awk flock git python3 sed sha256sum sudo tar; do
+if [[ -n "$private_inventory" && "$inventory" != "lab" ]]; then
+  printf 'ERROR: PRE_MUTATION_REFUSAL: --inventory-file is available only for lab.\n' >&2
+  exit 2
+fi
+
+for required_command in ansible-inventory ansible-playbook awk flock git python3 sed sha256sum tar; do
   require_command "$required_command"
 done
+if ((production_operation == 1)); then
+  require_command sudo
+fi
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$repo_root"
@@ -108,6 +122,13 @@ cleanup() {
 trap cleanup EXIT
 
 inventory_file="$repo_root/ansible/inventory/$inventory/hosts.yml"
+if [[ -n "$private_inventory" ]]; then
+  [[ "$private_inventory" == /* ]] || {
+    printf 'ERROR: PRE_MUTATION_REFUSAL: private inventory must be absolute.\n' >&2
+    exit 2
+  }
+  inventory_file="$private_inventory"
+fi
 [[ -f "$inventory_file" ]] || {
   printf 'ERROR: inventory file missing: %s\n' "$inventory_file" >&2
   exit 1
@@ -119,6 +140,10 @@ bash "$repo_root/scripts/assert-ansible-hosts.sh" "$inventory_file"
 if ((production_operation == 1)); then
   python3 "$repo_root/scripts/validate-target-inventory.py" \
     "$inventory_file" --environment production
+elif [[ -n "$private_inventory" ]]; then
+  python3 "$repo_root/scripts/validate-target-inventory.py" \
+    "$inventory_file" --environment lab --require-ssh --single-host \
+    --outside-repository "$repo_root"
 fi
 
 target_lock_key="$(python3 "$repo_root/scripts/target-lock-key.py" "$inventory_file")"
