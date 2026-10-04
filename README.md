@@ -131,7 +131,7 @@ The first stateful recovery reference is tracked separately in #4 and does not b
 
 ## Origin
 
-DeployInvariant was extracted from the transaction work that started in [HomeLab Ops Blueprint](https://github.com/d-prost/homelab-ops-blueprint). The implementation starts here with a clean repository history; the predecessor remains useful as development history rather than product history.
+DeployInvariant was extracted from transaction work that started in [the predecessor repository](https://github.com/d-prost/homelab-ops-blueprint). The implementation starts here with a clean repository history; the predecessor remains useful as development history rather than product history.
 
 Broader system design notes live in [HomeLab Engineering](https://github.com/d-prost/homelab-engineering).
 
