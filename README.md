@@ -114,9 +114,12 @@ make interruption-proof
 make stale-marker-proof
 make ssh-interruption-proof
 make failure-matrix-proof
+make stateful-recovery-proof
 ```
 
 CI runs the matching repository and disposable proofs. CI has no Production deployment authority.
+
+The stateful recovery proof uses only synthetic SQLite data and stays separate from the configuration transaction.
 
 ## Status
 
@@ -134,7 +137,11 @@ The [remote SSH record](docs/evidence/REMOTE_SSH_PROOF_2026-10-05.md) and
 public-safe versions, results and timings. All eight final proof targets passed
 on the disposable Ubuntu VM.
 
-The first stateful recovery reference is tracked separately in #4 and does not block the initial stateless release.
+The first stateful recovery reference lives in
+[`recovery/stateful-sqlite/`](recovery/stateful-sqlite/). It proves a
+database-aware export, isolated restore, representative functional recovery and
+an unchanged source database using synthetic data only. Configuration rollback
+and persistent-data recovery remain separate controls.
 
 ## Origin
 
