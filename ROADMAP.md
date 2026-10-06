@@ -16,23 +16,32 @@ Implemented:
 - verified configuration rollback;
 - interruption reconciliation;
 - target/stack locking;
-- disposable rollback, idempotency and failure proofs.
-
-Remaining release gates:
-
-- #2 — enforce the intended GitHub `main` change controls and prove blocked/allowed merge behavior;
-- #3 — run the complete transaction against a genuinely separate SSH target;
-- run the final clean-checkout proof set after both gates are complete.
+- disposable rollback, idempotency and failure proofs;
+- #2 — enforced GitHub `main` change controls with blocked/allowed merge evidence;
+- #3 — complete transaction proof against a genuinely separate SSH target;
+- final clean-checkout proof set and public-safe v1 acceptance evidence.
 
 ## After v1
 
-#4 tracks the first stateful recovery reference.
+Implemented:
 
-Possible later work only when a concrete need appears:
+- #4 — first public stateful recovery reference with synthetic SQLite data,
+  database-aware export, isolated restore, representative functional recovery,
+  source immutability verification and explicit separation from configuration
+  rollback.
 
-- richer versioned deployment records;
-- JSON output for inspection;
-- additional generic stack examples;
-- carefully bounded multi-host semantics.
+Ordered next work:
 
-A dashboard, scheduler, drift daemon, backup framework or cluster control plane is not on the roadmap.
+1. stability evaluation window;
+2. stable JSON terminal result schema;
+3. durable append-only transaction history;
+4. richer declarative HTTP checks with bounded JSON extraction/comparisons;
+5. JUnit output;
+6. reusable GitHub Action;
+7. generic outbound webhook.
+
+A Prometheus check is considered only after the ordered work above is complete
+and only when a concrete repository use case justifies it.
+
+A custom DSL, dashboard, scheduler, drift daemon, deployment database, cluster
+control plane or vendor-specific alert integration is not on the roadmap.

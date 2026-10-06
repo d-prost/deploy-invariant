@@ -75,6 +75,26 @@ The schema is strict and unknown fields are rejected. The file contains only the
 
 The readiness file must be a regular file outside the repository checkout and must not be group- or world-writable.
 
+## Executable public reference
+
+[`recovery/sqlite-reference/`](../recovery/sqlite-reference/) is an executable
+synthetic reference for the mechanics behind a recovery-readiness assertion.
+
+It uses SQLite's database-aware online backup API, restores into a separate
+database path, runs integrity and representative data checks, verifies that the
+source database bytes remain unchanged, and reports bounded synthetic RPO/RTO
+observations:
+
+```bash
+make stateful-recovery-proof
+```
+
+The reference deliberately does not invoke configuration rollback and does not
+write a real readiness file into the repository. It demonstrates
+persistent-data recovery as a separate control. A real deployment must still
+create private, fresh evidence for its exact stack generation and environment
+objectives.
+
 ## Production use
 
 Set the readiness file and the maximum accepted backup age before running the normal deployment command:

@@ -17,6 +17,7 @@ python3 tests/test-stack-contracts.py
 python3 tests/test-functional-check-parsing.py
 python3 tests/test-operational-coverage.py
 python3 tests/test-recovery-readiness.py
+python3 tests/test-stateful-recovery-reference.py
 python3 tests/test-rollback-material-preflight.py
 python3 tests/test-target-inventory.py
 python3 tests/test-target-lock-key.py
