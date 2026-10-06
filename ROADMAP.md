@@ -26,7 +26,13 @@ Remaining release gates:
 
 ## After v1
 
-#4 tracks the first stateful recovery reference.
+Implemented:
+
+- #4 — synthetic SQLite stateful recovery reference with application-aware export, isolated restore and representative functional recovery.
+
+Next:
+
+- stability evaluation window before widening the public interface.
 
 Possible later work only when a concrete need appears:
 

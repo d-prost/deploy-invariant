@@ -1,0 +1,36 @@
+---
+stack_target_dir: /opt/deploy-invariant-ops/stacks/sqlite-notes
+stack_compose_dest: docker-compose.yml
+stack_expected_services:
+  - notes
+stack_managed_files:
+  - src: compose.yaml
+    dest: docker-compose.yml
+    mode: "0644"
+  - src: defaults.env
+    dest: defaults.env
+    mode: "0644"
+  - src: app.py
+    dest: app.py
+    mode: "0644"
+stack_functional_checks:
+  - name: sqlite-notes-http
+    service: notes
+    port: 8080
+    path: /health
+    status_codes:
+      - 200
+    body_regex: '"status":"ok"'
+operations:
+  services:
+    notes:
+      stateful: true
+      persistent_mounts:
+        - target: /data
+      backup:
+        policy: application-export
+      restore:
+        runbook: recovery/RESTORE.md
+        verification: http-record
+      monitoring:
+        required: false

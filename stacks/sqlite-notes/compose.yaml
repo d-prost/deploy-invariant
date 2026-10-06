@@ -1,0 +1,37 @@
+---
+name: deploy-invariant-stateful-reference
+
+services:
+  notes:
+    image: ${PYTHON_IMAGE:?Set immutable PYTHON_IMAGE RepoDigest}
+    restart: unless-stopped
+    working_dir: /app
+    command:
+      - python
+      - /app/app.py
+      - serve
+      - --database
+      - /data/notes.db
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: ./app.py
+        target: /app/app.py
+        read_only: true
+      - type: volume
+        source: notes_data
+        target: /data
+    networks:
+      - stateful_reference
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  notes_data: {}
+
+networks:
+  stateful_reference: {}

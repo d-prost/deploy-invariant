@@ -1,0 +1,37 @@
+---
+name: Stateful recovery reference
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stateful-recovery-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stateful-recovery-reference:
+    name: Synthetic stateful recovery proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Docker availability
+        run: |
+          docker version
+          docker compose version
+
+      - name: Prove application-aware isolated recovery
+        env:
+          DEPLOY_INVARIANT_STATEFUL_RECOVERY_TEST: "1"
+        run: bash tests/test-stateful-recovery-reference.sh

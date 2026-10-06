@@ -4,6 +4,10 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+### Added
+
+- Synthetic SQLite stateful recovery reference with application-aware JSON export, isolated restore, representative HTTP recovery verification and source-state isolation proof.
+
 ## v1.0.0 - 2026-10-05
 
 ### Added

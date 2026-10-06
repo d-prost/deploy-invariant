@@ -178,9 +178,14 @@ def validate_stack(stack_dir: Path) -> None:
 
 def compose_canonical_model(stack_dir: Path) -> dict:
     compose_path = stack_dir / "compose.yaml"
+    command = ["docker", "compose"]
+    env_file = stack_dir / "defaults.env"
+    if env_file.is_file():
+        command.extend(["--env-file", str(env_file)])
+    command.extend(["-f", str(compose_path), "config", "--format", "json"])
     try:
         result = subprocess.run(
-            ["docker", "compose", "-f", str(compose_path), "config", "--format", "json"],
+            command,
             cwd=stack_dir,
             text=True,
             capture_output=True,

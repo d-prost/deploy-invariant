@@ -1,0 +1,3 @@
+compose.yaml	/opt/deploy-invariant-ops/stacks/sqlite-notes/docker-compose.yml
+defaults.env	/opt/deploy-invariant-ops/stacks/sqlite-notes/defaults.env
+app.py	/opt/deploy-invariant-ops/stacks/sqlite-notes/app.py

@@ -114,6 +114,7 @@ make interruption-proof
 make stale-marker-proof
 make ssh-interruption-proof
 make failure-matrix-proof
+make stateful-recovery-proof
 ```
 
 CI runs the matching repository and disposable proofs. CI has no Production deployment authority.
@@ -134,7 +135,7 @@ The [remote SSH record](docs/evidence/REMOTE_SSH_PROOF_2026-10-05.md) and
 public-safe versions, results and timings. All eight final proof targets passed
 on the disposable Ubuntu VM.
 
-The first stateful recovery reference is tracked separately in #4 and does not block the initial stateless release.
+The first stateful recovery reference is implemented under [`stacks/sqlite-notes/`](stacks/sqlite-notes/). It uses synthetic data to prove an application-aware export, restore into a separate Compose project and volume, representative HTTP data recovery, and an unchanged source state. Configuration rollback remains separate from persistent-data recovery.
 
 ## Origin
 
