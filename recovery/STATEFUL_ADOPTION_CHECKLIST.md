@@ -53,3 +53,11 @@ Repeat the restore proof after material changes to storage layout, database engi
 A green timer, successful snapshot, monitoring presence or `container=running` is not recovery evidence.
 
 Routine updates and historical deployments do not bypass the readiness gate.
+
+## Executable synthetic reference
+
+The [SQLite notes recovery reference](../examples/stateful-sqlite/README.md)
+shows how to separate database-aware backup, isolated restore and application
+functional verification from the Git/Ansible configuration rollback boundary.
+Its test result does not authorize real stateful adoption; follow the complete
+checklist above and record independent private evidence.

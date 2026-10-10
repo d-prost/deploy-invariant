@@ -72,3 +72,12 @@ The complete control flow is described in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 Published evaluation notes should contain only non-sensitive compatibility and result data such as OS, Docker, Compose and Ansible versions, target class, commands used and reproducible errors.
 
 Credentials, private hostnames, addresses, backup locations, deployment receipts and recovery evidence remain outside public reports.
+
+## Stateful recovery reference (post-v1)
+
+Run `python3 tests/test-stateful-sqlite-recovery.py` or follow
+[the synthetic SQLite runbook](../examples/stateful-sqlite/README.md) to
+exercise an application-aware export and isolated functional restore.
+This extends the public evaluation coverage only for **synthetic** data; it
+does not replace private Production recovery-readiness evidence or establish
+real-world RPO/RTO targets.

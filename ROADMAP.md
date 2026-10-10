@@ -1,38 +1,43 @@
 # Roadmap
 
-The roadmap is intentionally narrow.
+The roadmap is intentionally narrow. DeployInvariant preserves bounded
+configuration transactions and does not implement a data-backup platform.
 
-## v1.0.0
+## v1.0.0 baseline
 
-The first stable release is defined by the transaction contract, not by feature count.
-
-Implemented:
+The implementation and release gates were completed:
 
 - target identity and SSH transport checks;
 - immutable image and contract preflight;
 - frozen rollback material;
-- functional verification;
-- durable acceptance;
-- verified configuration rollback;
-- interruption reconciliation;
-- target/stack locking;
-- disposable rollback, idempotency and failure proofs.
+- functional verification, durable acceptance and verified configuration rollback;
+- interruption reconciliation and target/stack locking;
+- disposable rollback, idempotency and failure proofs;
+- #2: enforced strict main checks with blocked/allowed merge proof;
+- #3: completed end-to-end recovery proof on a separate disposable SSH target;
+- final clean-checkout acceptance proof recorded.
 
-Remaining release gates:
+See [v1 acceptance](docs/V1_FINAL_ACCEPTANCE.md).
 
-- #2 — enforce the intended GitHub `main` change controls and prove blocked/allowed merge behavior;
-- #3 — run the complete transaction against a genuinely separate SSH target;
-- run the final clean-checkout proof set after both gates are complete.
+## Post-v1 roadmap (ordered)
 
-## After v1
+1. **#4 — first stateful recovery reference:** runnable synthetic SQLite
+   application-aware export, isolated restore and functional verification in
+   [examples/stateful-sqlite](examples/stateful-sqlite/). This demonstrates
+   application-data recovery independently of configuration rollback.
+2. **Stability evaluation window:** track required CI and repeatable proof
+   outcomes over a defined observation window before expanding the product.
+3. **Stable terminal JSON result schema:** deterministic, backward-compatible
+   machine-readable final transaction results.
+4. **Durable append-only transaction history:** bounded, audit-friendly records,
+   without an external database or daemon.
+5. **Richer declarative HTTP checks:** bounded JSON extraction/comparisons,
+   without a custom DSL.
+6. **JUnit output** for existing verification results.
+7. **Reusable GitHub Action** packaging the existing guarded invocation.
+8. **Generic outbound webhook** with bounded delivery and no vendor coupling.
 
-#4 tracks the first stateful recovery reference.
+Prometheus is deferred unless an identified repository use case justifies it.
 
-Possible later work only when a concrete need appears:
-
-- richer versioned deployment records;
-- JSON output for inspection;
-- additional generic stack examples;
-- carefully bounded multi-host semantics.
-
-A dashboard, scheduler, drift daemon, backup framework or cluster control plane is not on the roadmap.
+Out of scope: dashboard, scheduler, daemon, deployment database, Kubernetes
+control plane, vendor-specific alert integration and custom policy DSL.

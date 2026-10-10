@@ -107,3 +107,16 @@ The command exits without authorizing the deployment when, for example:
 - the readiness file is missing or has unsafe local permissions.
 
 Passing this check does not restore application data automatically. It only allows the configuration deployment to continue after the recovery prerequisites have been checked.
+
+## Runnable stateful-data recovery example
+
+The synthetic SQLite reference under
+[examples/stateful-sqlite](../examples/stateful-sqlite/README.md) demonstrates
+application-aware export, isolated restoration and an HTTP functional check
+without contacting Production. Its report intentionally marks Production
+non-mutation, configuration rollback compatibility, RPO and RTO as
+`NOT_EVALUATED` rather than making claims unsupported by a disposable example.
+
+This example does not create a Production readiness file or change the existing
+strict evidence schema. The operator must still conduct an environment-specific
+restore drill and independently establish each `ready` predicate.
