@@ -16,6 +16,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
@@ -57,9 +58,10 @@ def seed(path: Path) -> None:
     if path.exists() or path.is_symlink() or not path.parent.is_dir():
         raise RecoveryError("seed destination must be absent and parent directory must exist")
     try:
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db:
             db.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT UNIQUE NOT NULL, body TEXT NOT NULL)")
             db.executemany("INSERT INTO notes (id, title, body) VALUES (?, ?, ?)", EXPECTED_NOTES)
+            db.commit()
         os.chmod(path, 0o600)
     except BaseException:
         path.unlink(missing_ok=True)
@@ -77,11 +79,11 @@ def export_backup(source: Path, destination: Path) -> str:
     try:
         with tempfile.NamedTemporaryFile(prefix=".sqlite-export-", suffix=".db", dir=destination.parent, delete=False) as tmp:
             temp_path = Path(tmp.name)
-        with _open_readonly(source) as live:
+        with closing(_open_readonly(source)) as live:
             _read_notes(live)
-            with sqlite3.connect(temp_path) as backup:
+            with closing(sqlite3.connect(temp_path)) as backup:
                 live.backup(backup, pages=100, sleep=0.1)
-        with _open_readonly(temp_path) as exported:
+        with closing(_open_readonly(temp_path)) as exported:
             _read_notes(exported)
         # os.link is exclusive: an existing destination is never overwritten.
         os.link(temp_path, destination)
@@ -99,7 +101,7 @@ class NotesHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         try:
-            with _open_readonly(self.database) as db:
+            with closing(_open_readonly(self.database)) as db:
                 notes = _read_notes(db)
             payload: dict = {"status": "ok"} if self.path == "/health" else {
                 "notes": [{"id": note_id, "title": title, "body": body} for note_id, title, body in notes]
@@ -127,7 +129,7 @@ def verify_isolated_restore(backup: Path, workspace: Path) -> dict:
     with tempfile.TemporaryDirectory(prefix="deploy-invariant-isolated-", dir=workspace) as tmp:
         restored = Path(tmp) / "restored.db"
         shutil.copyfile(backup, restored)
-        with _open_readonly(restored) as db:
+        with closing(_open_readonly(restored)) as db:
             notes = _read_notes(db)
 
         handler = type("IsolatedNotesHandler", (NotesHandler,), {"database": restored})
